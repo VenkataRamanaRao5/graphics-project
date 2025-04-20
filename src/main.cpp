@@ -10,12 +10,18 @@
 #include <complex>
 #include <cmath>
 #include <iostream>
+#include <unistd.h>
 
 const unsigned int SCR_WIDTH = 1000;
 const unsigned int SCR_HEIGHT = 600;
 
 float camX = 0.0f, camY = 0.0f, camZ = -20.0f;
 float camSpeed = 0.01f;
+
+float centerX = 0.0f, centerY = 0.0f, centerZ = 0.0f;
+float centerSpeed = 0.01f;
+
+bool movingCam = true;
 
 // Vertex shader for 3D rendering
 const char *vertexShaderSource = R"(
@@ -43,6 +49,7 @@ std::vector<Poly *> polygons;
 std::vector<float> buffer;
 std::vector<Poly *> foldingWait;
 unsigned int VAO, VBO;
+float angle = acos(sqrt(5) / 3);
 
 // Represents a regular polygon in 3D space (flat on XY plane)
 struct Poly
@@ -51,6 +58,7 @@ struct Poly
     std::vector<glm::vec3> vertices;             // 3D vertices
     bool folded = false;                         // Indicates if the polygon has been folded in the 3D structure
     std::vector<std::vector<Poly *>> dependents; // For each edge, a list of child polygons dependent on it
+    int dependentsCount = 0;
 
     Poly(cfloat c, int sides, float radius, float angleOffset)
     {
@@ -70,8 +78,7 @@ struct Poly
         int sides = edgeAndSides.second;
 
         auto z1 = cfloat(parent.vertices[edgeIndex].x, parent.vertices[edgeIndex].y);
-        auto z2 = cfloat(parent.vertices[(edgeIndex + parent.vertices.size() - 2) % (parent.vertices.size() - 1)].x,
-                         parent.vertices[(edgeIndex + parent.vertices.size() - 2) % (parent.vertices.size() - 1)].y);
+        auto z2 = cfloat(parent.vertices[edgeIndex - 1].x, parent.vertices[edgeIndex - 1].y);
         auto midpoint = (z1 + z2) / 2.0f;
 
         float theta = (sides - 2) * M_PI / (2.0 * sides);
@@ -91,6 +98,7 @@ struct Poly
 
         dependents.resize(vertices.size() - 1);
         parent.dependents[edgeIndex - 1].push_back(this);
+        parent.dependentsCount++;
     }
 
     // Rotate only this polygon around an axis passing through pivot point
@@ -123,12 +131,12 @@ struct Poly
             }
         }
     }
-    
+
     // Recursively fold all dependent polygons
     void foldDependents(float angleRad)
     {
         folded = true;
-        
+        std ::cout << "Folding" << center << std::endl;
         for (int edge = 0; edge < dependents.size(); ++edge)
         {
             std ::cout << edge << std::endl;
@@ -136,12 +144,13 @@ struct Poly
             const glm::vec3 &v2 = vertices[edge + 1];
             glm::vec3 edgeVec = glm::normalize(v2 - v1);
             glm::vec3 pivot = 0.5f * (v1 + v2);
-            
+
             for (Poly *child : dependents[edge])
             {
                 if (child->folded)
-                continue;
+                    continue;
                 child->foldThisAndAll(angleRad, edgeVec, pivot);
+                // child->foldDependents(angleRad);
                 foldingWait.push_back(child);
             }
         }
@@ -151,9 +160,11 @@ struct Poly
 // Builds a flat net approximating an icosahedron
 void build_icosahedron_net()
 {
-
+    angle = acos(sqrt(5) / 3);
+    polygons.clear();
+    foldingWait.clear();
     // Starting triangle
-    polygons.emplace_back(new Poly(cfloat(-3.0f, 0.0f), 3, 1.0f, M_PI / 2.0f));
+    polygons.emplace_back(new Poly(cfloat(0.0f, 0.0f), 3, 2.0f, M_PI / 2.0f));
 
     // Create net with alternating 3-2 triangle attachments
     for (int edge : {3, 2, 3, 2, 3, 2, 3, 2, 3})
@@ -172,9 +183,87 @@ void build_icosahedron_net()
     build_buffer();
 }
 
+void build_dodecahedron_net()
+{
+
+    angle = acos(1 / sqrt(5));
+
+    polygons.clear();
+    foldingWait.clear();
+
+    polygons.emplace_back(new Poly(cfloat(0.0f, 0.0f), 5, 2.0f, M_PI / 2.0f));
+
+    for (int edge : {1, 5, 2, 5, 2, 5, 2, 5, 2})
+        polygons.emplace_back(new Poly(*polygons.back(), std::pair<int, int>{edge, 5}));
+
+    polygons.emplace_back(new Poly(*polygons.back(), std::pair<int, int>{3, 5}));
+    polygons.emplace_back(new Poly(*polygons.front(), std::pair<int, int>{3, 5}));
+
+    foldingWait.push_back(polygons[0]);
+    build_buffer();
+}
+
+void build_octahedron_net()
+{
+    angle = acos(1.0f / 3.0f);
+    polygons.clear();
+    foldingWait.clear();
+    // Starting triangle
+    polygons.emplace_back(new Poly(cfloat(0.0f, 0.0f), 3, 2.0f, M_PI / 2.0f));
+
+    // Create net with alternating 3-2 triangle attachments
+    for (int edge : {3, 3, 3})
+    {
+        polygons.emplace_back(new Poly(*polygons.back(), std::pair<int, int>{edge, 3}));
+    }
+    
+    polygons.emplace_back(new Poly(*polygons.front(), std::pair<int, int>{2, 3}));
+    for (int edge : {2, 3, 3})
+    {
+        polygons.emplace_back(new Poly(*polygons.back(), std::pair<int, int>{edge, 3}));
+    }
+
+    foldingWait.push_back(polygons[0]);
+    // Extract line segments for rendering
+    build_buffer();
+}
+
+void build_hexahedron_net()
+{
+    angle = M_PI / 2.0f;
+
+    polygons.clear();
+    foldingWait.clear();
+
+    polygons.emplace_back(new Poly(cfloat(0.0f, 0.0f), 4, 2.0f, M_PI / 4.0f));
+
+    for (int edge : {2, 3, 3})
+        polygons.emplace_back(new Poly(*polygons.back(), std::pair<int, int>{edge, 4}));
+        
+    polygons.emplace_back(new Poly(*polygons.back(), std::pair<int, int>{4, 4}));
+    polygons.emplace_back(new Poly(*polygons.front(), std::pair<int, int>{1, 4}));
+
+    foldingWait.push_back(polygons[0]);
+    build_buffer();
+}
+
+void build_tetrahedron_net()
+{
+    angle = acos(-1.0f / 3.0f);
+    polygons.clear();
+    foldingWait.clear();
+    // Starting triangle
+    polygons.emplace_back(new Poly(cfloat(0.0f, 0.0f), 3, 2.0f, M_PI / 2.0f));
+    polygons.emplace_back(new Poly(*polygons.front(), std::pair<int, int>{1, 3}));
+    polygons.emplace_back(new Poly(*polygons.front(), std::pair<int, int>{2, 3}));
+    polygons.emplace_back(new Poly(*polygons.front(), std::pair<int, int>{3, 3}));
+    foldingWait.push_back(polygons[0]);
+    // Extract line segments for rendering
+    build_buffer();
+}
+
 void build_buffer()
 {
-    std ::cout << "Buffering" << std::endl;
     buffer.clear();
     for (const auto &poly : polygons)
     {
@@ -189,7 +278,6 @@ void build_buffer()
         }
     }
 
-
     glBindBuffer(GL_ARRAY_BUFFER, VBO);
     glBufferData(GL_ARRAY_BUFFER, buffer.size() * sizeof(float), buffer.data(), GL_DYNAMIC_DRAW);
 }
@@ -200,32 +288,84 @@ void processInput(GLFWwindow *window)
     if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
         glfwSetWindowShouldClose(window, true);
     if (glfwGetKey(window, GLFW_KEY_UP) == GLFW_PRESS)
-        camY += camSpeed;
+    {
+        if (movingCam)
+            camY += camSpeed;
+        else
+            centerY += centerSpeed;
+    }
     if (glfwGetKey(window, GLFW_KEY_DOWN) == GLFW_PRESS)
-        camY -= camSpeed;
+    {
+
+        if (movingCam)
+            camY -= camSpeed;
+        else
+            centerY -= centerSpeed;
+    }
     if (glfwGetKey(window, GLFW_KEY_LEFT) == GLFW_PRESS)
-        camX -= camSpeed;
+    {
+
+        if (movingCam)
+            camX -= camSpeed;
+        else
+            centerX -= centerSpeed;
+    }
     if (glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS)
-        camX += camSpeed;
+    {
+        if (movingCam)
+            camX += camSpeed;
+
+        else
+            centerX += centerSpeed;
+    }
     if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
-        camZ += camSpeed;
+    {
+
+        if (movingCam)
+            camZ += camSpeed;
+        else
+            centerZ += centerSpeed;
+    }
     if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
-        camZ -= camSpeed;
-    if(glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS) { 
-        camX = 0.0f;
-        camY = 0.0f;
-        camZ = -20.0f;
+    {
+
+        if (movingCam)
+            camZ -= camSpeed;
+        else
+            centerZ -= centerSpeed;
+    }
+    if (glfwGetKey(window, GLFW_KEY_V) == GLFW_PRESS)
+        movingCam = !movingCam;
+    if (glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS)
+    {
+        if (movingCam)
+        {
+            camX = 0.0f;
+            camY = 0.0f;
+            camZ = -20.0f;
+        }
+        else
+        {
+            centerX = 0.0f;
+            centerY = 0.0f;
+            centerZ = 0.0f;
+        }
     }
     static bool spaceWasPressed = false;
-    if(glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS)
+    if (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS)
         spaceWasPressed = false;
     bool spacePressed = glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS;
 
     if (spacePressed && !spaceWasPressed)
     {
-        float angle = acos(sqrt(5) / 3); // Or whatever interplanar angle you want
-        Poly* poly = foldingWait.front();
-        foldingWait.erase(foldingWait.begin());
+        Poly *poly;
+        if(foldingWait.size() == 0)
+            return;
+        do
+        {
+            poly = foldingWait.front();
+            foldingWait.erase(foldingWait.begin());
+        } while (poly->dependentsCount == 0);
         poly->foldDependents(angle);
         spaceWasPressed = true;
     }
@@ -241,8 +381,27 @@ void mouse_button_callback(GLFWwindow *window, int button, int action, int mods)
         if (xpos < 100)
         {
             int boxIndex = static_cast<int>(ypos / 60);
-            if (boxIndex >= 0 && boxIndex < 5)
+            if (boxIndex >= 0 && boxIndex < 5){
                 std::cout << "Clicked on solid box: " << boxIndex << std::endl;
+                switch (boxIndex)
+                {
+                    case 0:
+                        build_tetrahedron_net();
+                        break;
+                    case 1:
+                        build_hexahedron_net();
+                        break;
+                    case 2:
+                        build_octahedron_net();
+                        break;
+                    case 3:
+                        build_dodecahedron_net();
+                        break;
+                    case 4:
+                        build_icosahedron_net();
+                        break;
+                }
+            }
         }
     }
 }
@@ -276,7 +435,7 @@ int main()
     glDeleteShader(fragmentShader);
 
     // Upload icosahedron geometry
-    build_icosahedron_net();
+    // build_icosahedron_net();
 
     glGenVertexArrays(1, &VAO);
     glGenBuffers(1, &VBO);
@@ -299,7 +458,7 @@ int main()
 
         // Set up camera and projection
         glm::mat4 projection = glm::perspective(glm::radians(45.0f), SCR_WIDTH / (float)SCR_HEIGHT, 0.1f, 100.0f);
-        glm::mat4 view = glm::lookAt(glm::vec3(camX, camY, camZ), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0, 1, 0));
+        glm::mat4 view = glm::lookAt(glm::vec3(camX, camY, camZ), glm::vec3(centerX, centerY, centerZ), glm::vec3(0, 1, 0));
 
         glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
         glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "view"), 1, GL_FALSE, glm::value_ptr(view));
