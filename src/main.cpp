@@ -23,7 +23,7 @@ float centerSpeed = 0.01f;
 
 bool movingCam = true;
 
-// Vertex shader for 3D rendering
+// Vertex shader (simplified)
 const char *vertexShaderSource = R"(
 #version 330 core
 layout (location = 0) in vec3 aPos;
@@ -33,12 +33,30 @@ void main() {
     gl_Position = projection * view * vec4(aPos, 1.0);
 })";
 
-// Fragment shader for 3D rendering
+// Fragment shader with constant color
 const char *fragmentShaderSource = R"(
 #version 330 core
 out vec4 FragColor;
 void main() {
-    FragColor = vec4(0.2, 0.8, 1.0, 1.0);
+    FragColor = vec4(0.8, 0.8, 0.8, 0.3); // Gray with 0.3 opacity
+})";
+
+// Edge vertex shader (same as before)
+const char* edgeVertexShaderSource = R"(
+#version 330 core
+layout (location = 0) in vec3 aPos;
+uniform mat4 projection;
+uniform mat4 view;
+void main() {
+    gl_Position = projection * view * vec4(aPos, 1.0);
+})";
+
+// Edge fragment shader (solid color)
+const char* edgeFragmentShaderSource = R"(
+#version 330 core
+out vec4 FragColor;
+void main() {
+    FragColor = vec4(0.0, 0.0, 0.0, 1.0); // Black edges
 })";
 
 typedef std::complex<float> cfloat;
@@ -56,6 +74,7 @@ struct Poly
 {
     cfloat center;                               // Complex center of the polygon
     std::vector<glm::vec3> vertices;             // 3D vertices
+    std::vector<glm::vec3> faceVertices;
     bool folded = false;                         // Indicates if the polygon has been folded in the 3D structure
     std::vector<std::vector<Poly *>> dependents; // For each edge, a list of child polygons dependent on it
     int dependentsCount = 0;
@@ -68,6 +87,12 @@ struct Poly
             float theta = 2.0f * M_PI * i / sides + angleOffset;
             cfloat point = c + std::polar(radius, theta);
             vertices.emplace_back(point.real(), point.imag(), 0.0f);
+        }
+        glm::vec3 center3D(center.real(), center.imag(), 0.0f);
+        for (size_t i = 0; i < vertices.size() - 1; ++i) {
+            faceVertices.push_back(center3D);
+            faceVertices.push_back(vertices[i]);
+            faceVertices.push_back(vertices[i + 1]);
         }
         dependents.resize(vertices.size() - 1);
     }
@@ -95,6 +120,11 @@ struct Poly
             cfloat point = center + radius * std::polar(1.0f, angle);
             vertices.emplace_back(point.real(), point.imag(), 0.0f);
         }
+        for (size_t i = 1; i < vertices.size() - 1; ++i) {
+            faceVertices.push_back(vertices[0]);
+            faceVertices.push_back(vertices[i]);
+            faceVertices.push_back(vertices[i + 1]);
+        }
 
         dependents.resize(vertices.size() - 1);
         parent.dependents[edgeIndex - 1].push_back(this);
@@ -112,6 +142,12 @@ struct Poly
             glm::vec4 relative = glm::vec4(v - pivot, 1.0f);
             glm::vec4 rotated = rot * relative;
             v = glm::vec3(rotated) + pivot;
+        }
+        faceVertices.clear();
+        for (size_t i = 1; i < vertices.size() - 1; ++i) {
+            faceVertices.push_back(vertices[0]);
+            faceVertices.push_back(vertices[i]);
+            faceVertices.push_back(vertices[i + 1]);
         }
 
         build_buffer();
@@ -261,11 +297,16 @@ void build_tetrahedron_net()
     // Extract line segments for rendering
     build_buffer();
 }
+// Add these global variables
+unsigned int faceVAO, faceVBO;
+std::vector<float> faceBuffer;
 
-void build_buffer()
-{
+void build_buffer() {
+    // Clear existing buffers
     buffer.clear();
-    for (const auto &poly : polygons)
+    faceBuffer.clear();
+
+    for (const auto &poly : polygons) 
     {
         for (size_t i = 0; i < poly->vertices.size() - 1; ++i)
         {
@@ -276,10 +317,22 @@ void build_buffer()
             buffer.push_back(poly->vertices[i + 1].y);
             buffer.push_back(poly->vertices[i + 1].z);
         }
+
+        // 2. Add faces to face buffer
+        for (const auto& vertex : poly->faceVertices) {
+            faceBuffer.push_back(vertex.x);
+            faceBuffer.push_back(vertex.y);
+            faceBuffer.push_back(vertex.z);
+        }
     }
 
+    // Update line VBO
     glBindBuffer(GL_ARRAY_BUFFER, VBO);
     glBufferData(GL_ARRAY_BUFFER, buffer.size() * sizeof(float), buffer.data(), GL_DYNAMIC_DRAW);
+
+    // Update face VBO
+    glBindBuffer(GL_ARRAY_BUFFER, faceVBO);
+    glBufferData(GL_ARRAY_BUFFER, faceBuffer.size() * sizeof(float), faceBuffer.data(), GL_DYNAMIC_DRAW);
 }
 
 // Handle keyboard input for camera movement
@@ -406,73 +459,165 @@ void mouse_button_callback(GLFWwindow *window, int button, int action, int mods)
     }
 }
 
-int main()
-{
+
+// Helper functions for shader error checking
+void checkShaderCompile(unsigned int shader, const std::string& type) {
+    GLint success;
+    GLchar infoLog[1024];
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
+    if (!success) {
+        glGetShaderInfoLog(shader, 1024, NULL, infoLog);
+        std::cout << "ERROR::SHADER_COMPILATION_ERROR of type: " << type << "\n" 
+                  << infoLog << std::endl;
+    }
+}
+
+void checkProgramLink(unsigned int program, const std::string& type) {
+    GLint success;
+    GLchar infoLog[1024];
+    glGetProgramiv(program, GL_LINK_STATUS, &success);
+    if (!success) {
+        glGetProgramInfoLog(program, 1024, NULL, infoLog);
+        std::cout << "ERROR::PROGRAM_LINKING_ERROR of type: " << type << "\n" 
+                  << infoLog << std::endl;
+    }
+}
+
+int main() {
+    // Initialize GLFW
     glfwInit();
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-    GLFWwindow *window = glfwCreateWindow(SCR_WIDTH, SCR_HEIGHT, "Icosahedron Net", NULL, NULL);
+
+    // Create window
+    GLFWwindow* window = glfwCreateWindow(SCR_WIDTH, SCR_HEIGHT, "Polyhedron Net", NULL, NULL);
+    if (!window) {
+        std::cout << "Failed to create GLFW window" << std::endl;
+        glfwTerminate();
+        return -1;
+    }
     glfwMakeContextCurrent(window);
-    gladLoadGLLoader((GLADloadproc)glfwGetProcAddress);
     glfwSetMouseButtonCallback(window, mouse_button_callback);
 
+    // Load GLAD
+    if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
+        std::cout << "Failed to initialize GLAD" << std::endl;
+        return -1;
+    }
+
     // Compile shaders
-    unsigned int vertexShader = glCreateShader(GL_VERTEX_SHADER);
-    glShaderSource(vertexShader, 1, &vertexShaderSource, NULL);
-    glCompileShader(vertexShader);
+    // Face shaders
+    unsigned int faceVertexShader = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(faceVertexShader, 1, &vertexShaderSource, NULL);
+    glCompileShader(faceVertexShader);
+    checkShaderCompile(faceVertexShader, "Face Vertex");
 
-    unsigned int fragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
-    glShaderSource(fragmentShader, 1, &fragmentShaderSource, NULL);
-    glCompileShader(fragmentShader);
+    unsigned int faceFragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(faceFragmentShader, 1, &fragmentShaderSource, NULL);
+    glCompileShader(faceFragmentShader);
+    checkShaderCompile(faceFragmentShader, "Face Fragment");
 
-    unsigned int shaderProgram = glCreateProgram();
-    glAttachShader(shaderProgram, vertexShader);
-    glAttachShader(shaderProgram, fragmentShader);
-    glLinkProgram(shaderProgram);
+    unsigned int faceShaderProgram = glCreateProgram();
+    glAttachShader(faceShaderProgram, faceVertexShader);
+    glAttachShader(faceShaderProgram, faceFragmentShader);
+    glLinkProgram(faceShaderProgram);
+    checkProgramLink(faceShaderProgram, "Face");
 
-    glDeleteShader(vertexShader);
-    glDeleteShader(fragmentShader);
+    // Edge shaders
+    unsigned int edgeVertexShader = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(edgeVertexShader, 1, &edgeVertexShaderSource, NULL);
+    glCompileShader(edgeVertexShader);
+    checkShaderCompile(edgeVertexShader, "Edge Vertex");
 
-    // Upload icosahedron geometry
-    // build_icosahedron_net();
+    unsigned int edgeFragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(edgeFragmentShader, 1, &edgeFragmentShaderSource, NULL);
+    glCompileShader(edgeFragmentShader);
+    checkShaderCompile(edgeFragmentShader, "Edge Fragment");
 
+    unsigned int edgeShaderProgram = glCreateProgram();
+    glAttachShader(edgeShaderProgram, edgeVertexShader);
+    glAttachShader(edgeShaderProgram, edgeFragmentShader);
+    glLinkProgram(edgeShaderProgram);
+    checkProgramLink(edgeShaderProgram, "Edge");
+
+    // Clean up shaders
+    glDeleteShader(faceVertexShader);
+    glDeleteShader(faceFragmentShader);
+    glDeleteShader(edgeVertexShader);
+    glDeleteShader(edgeFragmentShader);
+
+    // Generate buffers
     glGenVertexArrays(1, &VAO);
     glGenBuffers(1, &VBO);
+    glGenVertexArrays(1, &faceVAO);
+    glGenBuffers(1, &faceVBO);
+
+    // Set up edge VAO
     glBindVertexArray(VAO);
     glBindBuffer(GL_ARRAY_BUFFER, VBO);
-    glBufferData(GL_ARRAY_BUFFER, buffer.size() * sizeof(float), buffer.data(), GL_DYNAMIC_DRAW);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void *)0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
     glEnableVertexAttribArray(0);
-    glUseProgram(shaderProgram);
 
+    // Set up face VAO
+    glBindVertexArray(faceVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, faceVBO);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+
+    // Enable blending and depth testing
     glEnable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    while (!glfwWindowShouldClose(window))
-    {
+    // Initial geometry
+    build_tetrahedron_net();
+
+    // Main render loop
+    while (!glfwWindowShouldClose(window)) {
         processInput(window);
 
-        // Clear screen
+        // Clear buffers
         glClearColor(0.05f, 0.05f, 0.1f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        // Set up camera and projection
-        glm::mat4 projection = glm::perspective(glm::radians(45.0f), SCR_WIDTH / (float)SCR_HEIGHT, 0.1f, 100.0f);
-        glm::mat4 view = glm::lookAt(glm::vec3(camX, camY, camZ), glm::vec3(centerX, centerY, centerZ), glm::vec3(0, 1, 0));
+        // Camera setup
+        glm::mat4 projection = glm::perspective(glm::radians(45.0f), 
+            (float)SCR_WIDTH/(float)SCR_HEIGHT, 0.1f, 100.0f);
+        glm::mat4 view = glm::lookAt(
+            glm::vec3(camX, camY, camZ),
+            glm::vec3(centerX, centerY, centerZ),
+            glm::vec3(0.0f, 1.0f, 0.0f)
+        );
 
-        glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
-        glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "view"), 1, GL_FALSE, glm::value_ptr(view));
+        // 1. Draw faces (with depth test but no writing)
+        glDepthMask(GL_FALSE);
+        glUseProgram(faceShaderProgram);
+        glUniformMatrix4fv(glGetUniformLocation(faceShaderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
+        glUniformMatrix4fv(glGetUniformLocation(faceShaderProgram, "view"), 1, GL_FALSE, glm::value_ptr(view));
+        glBindVertexArray(faceVAO);
+        glDrawArrays(GL_TRIANGLES, 0, faceBuffer.size()/3);
+        glDepthMask(GL_TRUE);
 
-        // Draw the net
+        // 2. Draw edges (with depth writing)
+        glUseProgram(edgeShaderProgram);
+        glUniformMatrix4fv(glGetUniformLocation(edgeShaderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
+        glUniformMatrix4fv(glGetUniformLocation(edgeShaderProgram, "view"), 1, GL_FALSE, glm::value_ptr(view));
         glBindVertexArray(VAO);
-        glDrawArrays(GL_LINES, 0, buffer.size() / 3);
+        glDrawArrays(GL_LINES, 0, buffer.size()/3);
 
         glfwSwapBuffers(window);
         glfwPollEvents();
     }
 
+    // Cleanup
     glDeleteVertexArrays(1, &VAO);
     glDeleteBuffers(1, &VBO);
+    glDeleteVertexArrays(1, &faceVAO);
+    glDeleteBuffers(1, &faceVBO);
+    glDeleteProgram(faceShaderProgram);
+    glDeleteProgram(edgeShaderProgram);
+
     glfwTerminate();
     return 0;
 }
